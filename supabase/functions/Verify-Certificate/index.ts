@@ -22,7 +22,7 @@ serve(async (req)=>{
     const url = new URL(req.url);
     const uuid = url.searchParams.get("id");
     if (!uuid) {
-      return new Response("Missing id parameter", {
+      return new Response("Falta el parámetro ID del certificado para verificar", {
         status: 400,
         headers: corsHeaders
       });
@@ -32,7 +32,7 @@ serve(async (req)=>{
     const { data: cert, error: certError } = await supabase.from("certificates").select("*").eq("id", uuid).single();
     if (certError || !cert) {
       console.log("[DEBUG VERIFY] Certificate not found:", certError);
-      return new Response("Certificate not found", {
+      return new Response("Certificado no encontrado. Verifique que el código sea correcto o que el certificado haya sido emitido correctamente.", {
         status: 404,
         headers: corsHeaders
       });
@@ -44,11 +44,22 @@ serve(async (req)=>{
     const expirationDate = cert.expiration_date ? new Date(cert.expiration_date) : null;
     const revokedAt = cert.revoked_at ? new Date(cert.revoked_at) : null;
     if (cert.revoked || revokedAt || expirationDate && expirationDate < now) {
-      const reason = cert.revoked ? "revoked" : revokedAt ? "revoked_at" : "expired";
+      let reason = "";
+      let message = "";
+      if (cert.revoked || revokedAt) {
+        reason = "revoked";
+        const revokedDate = revokedAt ? revokedAt.toLocaleDateString('es-ES') : 'fecha desconocida';
+        message = `Certificado encontrado pero ha sido revocado (anulado) el ${revokedDate}. Este certificado ya no es válido.`;
+      } else if (expirationDate && expirationDate < now) {
+        reason = "expired";
+        const expiredDate = expirationDate.toLocaleDateString('es-ES');
+        message = `Certificado encontrado pero ha expirado el ${expiredDate}. Este certificado ya no es válido.`;
+      }
       return new Response(JSON.stringify({
         valid: false,
         certificate: cert,
-        reason: reason
+        reason: reason,
+        message: message
       }), {
         headers: {
           ...corsHeaders,
@@ -62,7 +73,7 @@ serve(async (req)=>{
     const { data: student, error: studentError } = await supabase.from("profiles").select("first_name, last_name, email").eq("id", cert.student_id).single();
     if (studentError || !student) {
       console.log("[DEBUG VERIFY] Student not found:", studentError);
-      return new Response("Student data not found", {
+      return new Response("Certificado encontrado pero los datos del estudiante no están disponibles. Contacte al emisor del certificado.", {
         status: 404,
         headers: corsHeaders
       });
@@ -71,13 +82,13 @@ serve(async (req)=>{
     const { data: course, error: courseError } = await supabase.from("courses").select("title, skills, professor_id").eq("id", cert.course_id).single();
     if (courseError || !course) {
       console.log("[DEBUG VERIFY] Course not found:", courseError);
-      return new Response("Course data not found", {
+      return new Response("Certificado encontrado pero los datos del curso no están disponibles. Contacte al emisor del certificado.", {
         status: 404,
         headers: corsHeaders
       });
     }
-    // 4️⃣ Reconstruir certData exacto — orden de keys idéntico a emisión, issued_at con medianoche
-    const issuedAtString = new Date(cert.issued_date).toISOString(); // "2025-11-07T00:00:00.000Z" — coincide con emisión
+    // 4️⃣ Reconstruir certData exacto — orden de keys idéntico a emisión
+    const issuedAtString = new Date(cert.issued_date).toISOString();
     const reconstructedCertData = {
       student_id: cert.student_id,
       course_id: cert.course_id,
@@ -89,7 +100,6 @@ serve(async (req)=>{
     };
     console.log("[DEBUG VERIFY] Reconstructed certData:", reconstructedCertData);
     console.log("[DEBUG VERIFY] JSON string for hash:", JSON.stringify(reconstructedCertData));
-    console.log("[DEBUG VERIFY] Professor ID match? Emission user (assumed):", "64a0f3ff-1026-426c-b9a7-13516c2696b4", "Course prof:", course.professor_id);
     // 5️⃣ Hash y verificar la firma
     const encoder = new TextEncoder();
     const certBytes = encoder.encode(JSON.stringify(reconstructedCertData));
@@ -110,27 +120,51 @@ serve(async (req)=>{
     }, publicKey, signatureBytes, certBytes);
     console.log("[DEBUG VERIFY] Signature valid:", validSignature);
     // 6️⃣ Response final
-    return new Response(JSON.stringify({
-      valid: validSignature,
-      certificate: {
-        id: cert.id,
-        readable_code: cert.readable_code,
-        student_id: cert.student_id,
-        course_id: cert.course_id,
-        issued_date: cert.issued_date,
-        ...reconstructedCertData
-      },
-      reason: !validSignature ? "Invalid signature or data mismatch (check logs for hash/prof match)" : null
-    }), {
-      headers: {
-        ...corsHeaders,
-        "Content-Type": "application/json"
-      },
-      status: 200
-    });
+    if (validSignature) {
+      return new Response(JSON.stringify({
+        valid: true,
+        certificate: {
+          id: cert.id,
+          readable_code: cert.readable_code,
+          student_id: cert.student_id,
+          course_id: cert.course_id,
+          issued_date: cert.issued_date,
+          pdf_url: cert.pdf_url,
+          ...reconstructedCertData
+        },
+        message: "Certificado válido y verificado correctamente. La firma digital coincide y el certificado está activo.",
+        reason: null
+      }), {
+        headers: {
+          ...corsHeaders,
+          "Content-Type": "application/json"
+        },
+        status: 200
+      });
+    } else {
+      return new Response(JSON.stringify({
+        valid: false,
+        certificate: {
+          id: cert.id,
+          readable_code: cert.readable_code,
+          student_id: cert.student_id,
+          course_id: cert.course_id,
+          issued_date: cert.issued_date,
+          ...reconstructedCertData
+        },
+        message: "Certificado encontrado pero la firma digital no es válida. Es posible que los datos hayan sido modificados o que haya un error en la verificación. Contacte al emisor del certificado.",
+        reason: "invalid_signature"
+      }), {
+        headers: {
+          ...corsHeaders,
+          "Content-Type": "application/json"
+        },
+        status: 200
+      });
+    }
   } catch (err) {
     console.error("[verify-certificate]", err);
-    return new Response("Internal Server Error", {
+    return new Response("Error interno del servidor durante la verificación del certificado. Inténtelo nuevamente o contacte al soporte técnico.", {
       status: 500,
       headers: corsHeaders
     });
@@ -141,6 +175,8 @@ function decodePEM(pem) {
   const base64 = pem.replace(/-----BEGIN PUBLIC KEY-----/, "").replace(/-----END PUBLIC KEY-----/, "").replace(/\s+/g, "");
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
-  for(let i = 0; i < binary.length; i++)bytes[i] = binary.charCodeAt(i);
+  for(let i = 0; i < binary.length; i++){
+    bytes[i] = binary.charCodeAt(i);
+  }
   return bytes.buffer;
 }

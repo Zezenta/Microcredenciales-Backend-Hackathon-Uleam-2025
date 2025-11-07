@@ -450,7 +450,7 @@ async function handleRequest(req) {
     const signatureBase64 = btoa(String.fromCharCode(...new Uint8Array(signature)));
     console.log("[DEBUG] Signature generated:", signatureBase64.substring(0, 50) + "...");
     // --- Persistencia del certificado con PDF URL ---
-    const { data: cert, error: insertError } = await supabase.from("PDF_CERTIFICATES").insert([
+    const { data: cert, error: insertError } = await supabase.from("certificates").insert([
       {
         id: certUuid,
         readable_code: codigo,
